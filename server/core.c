@@ -176,16 +176,44 @@ void *handle_api_request(void *arg) {
     int sock = args->socket;
     ServerContext *ctx = args->ctx;
     
-    // Read Header
-    api_req_header_t req_header;
-    if (recv(sock, &req_header, sizeof(req_header), 0) <= 0) {
+    // Read Header (1st byte)
+    uint8_t first_byte;
+    if (recv(sock, &first_byte, 1, 0) <= 0) {
         close(sock);
         free(arg);
         return 0;
     }
 
+    uint8_t req_type;
+    uint32_t payload_len;
+
+    if (first_byte == PROTOCOL_MAGIC_EXT) {
+        // Extended Header (0xFE + type + uint32_t len)
+        struct {
+            uint8_t type;
+            uint32_t len;
+        } __attribute__((packed)) ext;
+        if (recv(sock, &ext, sizeof(ext), 0) <= 0) {
+            close(sock);
+            free(arg);
+            return 0;
+        }
+        req_type = ext.type;
+        payload_len = ntohl(ext.len);
+        printf("[API] Extended Header Detected (Type: 0x%02X, Len: %u)\n", req_type, payload_len);
+    } else {
+        // Standard Header (type + uint16_t len)
+        req_type = first_byte;
+        uint16_t len16;
+        if (recv(sock, &len16, sizeof(len16), 0) <= 0) {
+            close(sock);
+            free(arg);
+            return 0;
+        }
+        payload_len = ntohs(len16);
+    }
+
     // Read Body
-    uint16_t payload_len = ntohs(req_header.len);
     char *payload = malloc(payload_len + 1);
     if (!payload) {
         close(sock);
@@ -193,7 +221,7 @@ void *handle_api_request(void *arg) {
         return 0;
     }
     
-    int total_read = 0;
+    uint32_t total_read = 0;
     while (total_read < payload_len) {
         int r = recv(sock, payload + total_read, payload_len - total_read, 0);
         if (r <= 0) break;
@@ -204,7 +232,7 @@ void *handle_api_request(void *arg) {
     // Delegate to Handler if set
     if (ctx->handler) {
         printf("[API] Delegating to Handler\n");
-        ctx->handler(sock, req_header.type, payload);
+        ctx->handler(sock, req_type, payload);
         // Handler is responsible for response and closing socket
         // But wait, if handler is async/go, we might need to be careful.
         // Assuming handler is blocking for this request.
@@ -218,7 +246,7 @@ void *handle_api_request(void *arg) {
     api_resp_header_t resp_header;
     char response_body[BUFFER_SIZE];
     
-    if (req_header.type == MSG_LOGIN_REQ) {
+    if (req_type == MSG_LOGIN_REQ) {
         printf("[API] Login Request: %s\n", payload);
         if (strstr(payload, "\"username\": \"admin\"") && strstr(payload, "\"password\": \"admin\"")) {
             resp_header.status = htons(200);
@@ -227,7 +255,7 @@ void *handle_api_request(void *arg) {
             resp_header.status = htons(401);
             sprintf(response_body, "{\"error\": \"Invalid Credentials\"}");
         }
-    } else if (req_header.type == MSG_LIST_REQ) {
+    } else if (req_type == MSG_LIST_REQ) {
         printf("[API] List Request\n");
         // Build JSON List
         strcpy(response_body, "{\"users\": [");
@@ -427,14 +455,31 @@ void server_broadcast(ServerContext *ctx, char *message) {
 }
 
 void server_send_response(int sock, int type, int status, char *message) {
-    api_resp_header_t resp_header;
-    resp_header.type = type;
-    resp_header.status = htons(status);
-    resp_header.len = htons(strlen(message));
-    
-    write(sock, &resp_header, sizeof(resp_header));
-    write(sock, message, strlen(message));
-    
+    uint32_t msg_len = (message != NULL) ? (uint32_t)strlen(message) : 0;
+
+    if (msg_len > 65535) {
+        api_resp_header_ext_t resp_header;
+        resp_header.magic = PROTOCOL_MAGIC_EXT;
+        resp_header.type = (uint8_t)type;
+        resp_header.len = htonl(msg_len);
+        resp_header.status = htons(status);
+        write(sock, &resp_header, sizeof(resp_header));
+    } else {
+        api_resp_header_t resp_header;
+        resp_header.type = (uint8_t)type;
+        resp_header.status = htons(status);
+        resp_header.len = htons((uint16_t)msg_len);
+        write(sock, &resp_header, sizeof(resp_header));
+    }
+
+    if (msg_len > 0) {
+        uint32_t total_written = 0;
+        while (total_written < msg_len) {
+            ssize_t n = write(sock, message + total_written, msg_len - total_written);
+            if (n <= 0) break;
+            total_written += (uint32_t)n;
+        }
+    }
     close(sock);
 }
 

@@ -11,14 +11,27 @@ type BackupInitReq struct {
 	FileUUID  string `json:"file_uuid"`
 	FileName  string `json:"file_name"`
 	TotalSize int64  `json:"total_size"`
+	HeadHash  string `json:"head_hash"`
+}
+
+type BackupResumeReq struct {
+	DeviceID  string `json:"device_id"`
+	FileUUID  string `json:"file_uuid"`
+	HeadHash  string `json:"head_hash"`
+	TotalSize int64  `json:"total_size"`
+}
+
+type BackupResumeResp struct {
+	TransferID string `json:"transfer_id"`
+	Offset     int64  `json:"offset"`
+	Status     string `json:"status"` // "found", "not_found", "mismatch"
 }
 
 type BackupChunkReq struct {
 	TransferID string `json:"transfer_id"`
 	Offset     int64  `json:"offset"`
 	DataLen    int64  `json:"data_len"`
-	// Note: Actual data is usually handled separately or embedded in JSON for small chunks
-	// The user specified: offset; data_len; data[];
+	Data       string `json:"data"` // Hex encoded or base64
 }
 
 type BackupFinishReq struct {
@@ -34,7 +47,7 @@ func HandleBackupInit(clientID int, payload string) {
 		return
 	}
 
-	session, err := BackupSvc.InitSession(req.DeviceID, req.FileUUID, req.FileName, req.TotalSize)
+	session, err := BackupSvc.InitSession(req.DeviceID, req.FileUUID, req.FileName, req.TotalSize, req.HeadHash)
 	if err != nil {
 		server.SendResponse(clientID, 0xF2, 500, fmt.Sprintf(`{"error": "%v"}`, err))
 		return
@@ -50,7 +63,9 @@ func HandleBackupChunk(clientID int, payload string) {
 		return
 	}
 
-	err := BackupSvc.UpdateChunk(req.TransferID, req.Offset, req.DataLen)
+	fmt.Printf("[Backup] Chunk Received: %s (Offset: %d, Len: %d)\n", req.TransferID, req.Offset, req.DataLen)
+
+	err := BackupSvc.UpdateChunk(req.TransferID, req.Offset, req.DataLen, req.Data)
 	if err != nil {
 		server.SendResponse(clientID, 0xF4, 500, fmt.Sprintf(`{"error": "%v"}`, err))
 		return
@@ -85,4 +100,30 @@ func HandleBackupCancel(clientID int, payload string) {
 
 	_ = BackupSvc.CancelSession(req.TransferID)
 	// No explicit response for cancel 0xF7 usually but can add if needed
+}
+
+func HandleBackupResume(clientID int, payload string) {
+	var req BackupResumeReq
+	if err := json.Unmarshal([]byte(payload), &req); err != nil {
+		server.SendResponse(clientID, 0xF9, 400, `{"error": "Invalid Payload"}`)
+		return
+	}
+
+	session, err := BackupSvc.GetActiveSession(req.DeviceID, req.FileUUID)
+	if err != nil {
+		server.SendResponse(clientID, 0xF9, 200, BackupResumeResp{Status: "not_found"})
+		return
+	}
+
+	// Verify integrity
+	if session.TotalSize != req.TotalSize || session.FileHeadHash != req.HeadHash {
+		server.SendResponse(clientID, 0xF9, 200, BackupResumeResp{Status: "mismatch"})
+		return
+	}
+
+	server.SendResponse(clientID, 0xF9, 200, BackupResumeResp{
+		TransferID: session.TransferID,
+		Offset:     session.CurrentOffset,
+		Status:     "found",
+	})
 }

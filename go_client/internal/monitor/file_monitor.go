@@ -10,6 +10,7 @@ import (
 	"encoding/hex"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -75,7 +76,7 @@ func NewFileMonitor(paths []string) (*FileMonitor, error) {
 	// 2. Auto Migrate ID
 	db := dbpkg.Get()
 	if db != nil {
-		db.AutoMigrate(&dbpkg.MonitoredFile{}, &dbpkg.FileChangeEvent{})
+		db.AutoMigrate(&dbpkg.MonitoredFile{}, &dbpkg.FileChangeEvent{}, &dbpkg.LocalRestoreSession{})
 	}
 
 	// 3. Add các đường dẫn ban đầu
@@ -143,7 +144,12 @@ func (f *FileMonitor) handleFsnotifyEvent(evt fsnotify.Event) {
 	now := time.Now()
 
 	// Ignore hidden files (optional)
-	if filepath.Base(path)[0] == '.' {
+	if filepath.Base(path)[0] == '.' && !strings.HasSuffix(path, ".part") {
+		return
+	}
+
+	// Ignore .part files used during restore
+	if strings.HasSuffix(path, ".part") {
 		return
 	}
 

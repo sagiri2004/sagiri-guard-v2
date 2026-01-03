@@ -12,6 +12,9 @@ type Config struct {
 		APIPort int    `yaml:"api_port"`
 		DBDSN   string `yaml:"db_dsn"`
 	} `yaml:"server"`
+	Backup struct {
+		StoragePath string `yaml:"storage_path"`
+	} `yaml:"backup"`
 }
 
 var AppConfig Config

@@ -6,18 +6,76 @@
 #include <sys/socket.h>
 #include <arpa/inet.h>
 
+static void _client_do_notification_connect(ClientContext *ctx) {
+    struct sockaddr_in server;
+    char server_reply[BUFFER_SIZE];
+
+    ctx->notification_sock = socket(AF_INET, SOCK_STREAM, 0);
+    if (ctx->notification_sock == -1) {
+        return;
+    }
+
+    server.sin_addr.s_addr = inet_addr(ctx->server_host);
+    server.sin_family = AF_INET;
+    server.sin_port = htons(ctx->server_port);
+
+    // Set connection timeout (short for retry)
+    struct timeval tv;
+    tv.tv_sec = 5;
+    tv.tv_usec = 0;
+    setsockopt(ctx->notification_sock, SOL_SOCKET, SO_SNDTIMEO, (const char*)&tv, sizeof tv);
+
+    if (connect(ctx->notification_sock, (struct sockaddr *)&server, sizeof(server)) < 0) {
+        close(ctx->notification_sock);
+        ctx->notification_sock = -1;
+        return;
+    }
+
+    // Reset to blocking or normal timeout if needed
+    tv.tv_sec = 0; 
+    setsockopt(ctx->notification_sock, SOL_SOCKET, SO_SNDTIMEO, (const char*)&tv, sizeof tv);
+
+    // Send Device ID
+    send_packet(ctx->notification_sock, ctx->device_id, strlen(ctx->device_id));
+    
+    if (recv_packet(ctx->notification_sock, server_reply) > 0) {
+         printf("\n[INFO] Connected to Notification Server: %s", server_reply);
+         fflush(stdout);
+    } else {
+        close(ctx->notification_sock);
+        ctx->notification_sock = -1;
+    }
+}
+
 void *listen_for_notifications(void *arg) {
     ClientContext *ctx = (ClientContext *)arg;
     char buffer[BUFFER_SIZE];
-    int read_size;
 
-    while (ctx->running && (read_size = recv_packet(ctx->notification_sock, buffer)) > 0) {
-        if (ctx->on_message) {
-            ctx->on_message(buffer);
+    while (ctx->running) {
+        if (ctx->notification_sock == -1) {
+            _client_do_notification_connect(ctx);
+            if (ctx->notification_sock == -1) {
+                sleep(2); // Retry every 2 seconds
+                continue;
+            }
+        }
+
+        int read_size = recv_packet(ctx->notification_sock, buffer);
+        if (read_size > 0) {
+            if (ctx->on_message) {
+                ctx->on_message(buffer);
+            } else {
+                printf("\n[NOTIFICATION] %s", buffer);
+                fflush(stdout);
+            }
         } else {
-            // Default behavior
-            printf("\n[NOTIFICATION] %s\nChoice: ", buffer);
-            fflush(stdout);
+            // Socket error or peer closed
+            if (ctx->running) {
+                printf("\n[WARNING] Lost connection to notification server. Reconnecting... ");
+                fflush(stdout);
+            }
+            close(ctx->notification_sock);
+            ctx->notification_sock = -1;
         }
     }
     return 0;
@@ -27,8 +85,6 @@ void *listen_for_notifications(void *arg) {
 static int client_api_request(ClientContext *ctx, uint8_t type, char *json_payload, char *response_buffer) {
     int sock;
     struct sockaddr_in server;
-    api_req_header_t req;
-    api_resp_header_t resp;
     struct timeval tv;
 
     sock = socket(AF_INET, SOCK_STREAM, 0);
@@ -47,13 +103,25 @@ static int client_api_request(ClientContext *ctx, uint8_t type, char *json_paylo
         return 0;
     }
 
-    req.type = type;
-    int p_len = (json_payload != NULL) ? strlen(json_payload) : 0;
-    req.len = htons(p_len);
+    int p_len = (json_payload != NULL) ? (int)strlen(json_payload) : 0;
 
-    if (send(sock, &req, sizeof(req), 0) < 0) {
-        close(sock);
-        return 0;
+    if (p_len > 65535) {
+        api_req_header_ext_t req_ext;
+        req_ext.magic = PROTOCOL_MAGIC_EXT;
+        req_ext.type = type;
+        req_ext.len = htonl((uint32_t)p_len);
+        if (send(sock, &req_ext, sizeof(req_ext), 0) < 0) {
+            close(sock);
+            return 0;
+        }
+    } else {
+        api_req_header_t req;
+        req.type = type;
+        req.len = htons((uint16_t)p_len);
+        if (send(sock, &req, sizeof(req), 0) < 0) {
+            close(sock);
+            return 0;
+        }
     }
 
     if (p_len > 0) {
@@ -63,26 +131,67 @@ static int client_api_request(ClientContext *ctx, uint8_t type, char *json_paylo
         }
     }
 
-    if (recv(sock, &resp, sizeof(resp), 0) < 0) {
+    uint8_t first_byte;
+    if (recv(sock, &first_byte, 1, 0) <= 0) {
         close(sock);
         return 0;
     }
 
-    int len = ntohs(resp.len);
-    if (len > 0) {
-        int total_read = 0;
-        while (total_read < len) {
-            int r = recv(sock, response_buffer + total_read, len - total_read, 0);
-            if (r <= 0) break;
-            total_read += r;
+    uint32_t resp_len;
+    uint status;
+
+    if (first_byte == PROTOCOL_MAGIC_EXT) {
+        struct {
+            uint8_t type;
+            uint32_t len;
+            uint16_t status;
+        } __attribute__((packed)) ext;
+        if (recv(sock, &ext, sizeof(ext), 0) <= 0) {
+            close(sock);
+            return 0;
         }
-        response_buffer[len] = '\0';
+        resp_len = ntohl(ext.len);
+        status = ntohs(ext.status);
     } else {
+        struct {
+            uint16_t len;
+            uint16_t status;
+        } __attribute__((packed)) std;
+        if (recv(sock, &std, sizeof(std), 0) <= 0) {
+            close(sock);
+            return 0;
+        }
+        resp_len = ntohs(std.len);
+        status = ntohs(std.status);
+    }
+
+    // Receive Payload
+    if (resp_len > 0) {
+        if (response_buffer) {
+            int total_read = 0;
+            while (total_read < (int)resp_len) {
+                int r = recv(sock, response_buffer + total_read, (int)resp_len - total_read, 0);
+                if (r <= 0) break;
+                total_read += r;
+            }
+            response_buffer[resp_len] = '\0';
+        } else {
+            // Drain the socket if we don't have a buffer but server sent data
+            char junk[1024];
+            uint32_t remaining = resp_len;
+            while (remaining > 0) {
+                int to_read = remaining > sizeof(junk) ? sizeof(junk) : remaining;
+                int r = recv(sock, junk, to_read, 0);
+                if (r <= 0) break;
+                remaining -= r;
+            }
+        }
+    } else if (response_buffer) {
         response_buffer[0] = '\0';
     }
 
     close(sock);
-    return ntohs(resp.status) == 200;
+    return status == 200;
 }
 
 ClientContext* client_init(char *host, int port, int api_port) {
@@ -218,31 +327,15 @@ int client_register_device(ClientContext *ctx, char *json_payload, char *respons
 }
 
 void client_connect_notification(ClientContext *ctx, char *device_id) {
-    struct sockaddr_in server;
-    char server_reply[BUFFER_SIZE];
     pthread_t listener_thread;
 
-    ctx->notification_sock = socket(AF_INET, SOCK_STREAM, 0);
-    if (ctx->notification_sock == -1) {
-        perror("Could not create notification socket");
-        return;
-    }
+    // Save device_id for reconnection
+    strncpy(ctx->device_id, device_id, sizeof(ctx->device_id) - 1);
+    ctx->device_id[sizeof(ctx->device_id) - 1] = '\0';
 
-    server.sin_addr.s_addr = inet_addr(ctx->server_host);
-    server.sin_family = AF_INET;
-    server.sin_port = htons(ctx->server_port);
-
-    if (connect(ctx->notification_sock, (struct sockaddr *)&server, sizeof(server)) < 0) {
-        perror("Notification Connect failed");
-        return;
-    }
-
-    // Send Device ID
-    send_packet(ctx->notification_sock, device_id, strlen(device_id));
-    
-    if (recv_packet(ctx->notification_sock, server_reply) > 0) {
-         printf("Connected to Notification Server: %s\n", server_reply);
-    }
+    // Instead of connecting here, we let the thread handle it.
+    // This allows connecting even if the server is down at startup.
+    ctx->notification_sock = -1; // Force thread to connect
 
     if (pthread_create(&listener_thread, NULL, listen_for_notifications, (void*)ctx) < 0) {
         perror("Could not create listener thread");
@@ -733,6 +826,10 @@ int client_admin_get_file_tree(ClientContext *ctx, char *json_payload, char *res
     return client_api_request(ctx, MSG_ADMIN_GET_FILE_TREE_REQ, json_payload, response_buffer);
 }
 
+int client_admin_restore(ClientContext *ctx, char *json_payload, char *response_buffer) {
+    return client_api_request(ctx, MSG_ADMIN_RESTORE_REQ, json_payload, response_buffer);
+}
+
 int client_backup_init(ClientContext *ctx, char *json_payload, char *response_buffer) {
     return client_api_request(ctx, MSG_BACKUP_INIT_REQ, json_payload, response_buffer);
 }
@@ -749,3 +846,22 @@ int client_backup_cancel(ClientContext *ctx, char *json_payload, char *response_
     return client_api_request(ctx, MSG_BACKUP_CANCEL_REQ, json_payload, response_buffer);
 }
 
+int client_backup_resume(ClientContext *ctx, char *json_payload, char *response_buffer) {
+    return client_api_request(ctx, MSG_BACKUP_RESUME_REQ, json_payload, response_buffer);
+}
+
+int client_restore_init(ClientContext *ctx, char *json_payload, char *response_buffer) {
+    return client_api_request(ctx, MSG_RESTORE_INIT_REQ, json_payload, response_buffer);
+}
+
+int client_restore_chunk(ClientContext *ctx, char *json_payload, char *response_buffer) {
+    return client_api_request(ctx, MSG_RESTORE_CHUNK_REQ, json_payload, response_buffer);
+}
+
+int client_restore_finish(ClientContext *ctx, char *json_payload, char *response_buffer) {
+    return client_api_request(ctx, MSG_RESTORE_FINISH_REQ, json_payload, response_buffer);
+}
+
+int client_restore_resume(ClientContext *ctx, char *json_payload, char *response_buffer) {
+    return client_api_request(ctx, MSG_RESTORE_RESUME_REQ, json_payload, response_buffer);
+}

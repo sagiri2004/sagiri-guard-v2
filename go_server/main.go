@@ -60,6 +60,7 @@ func main() {
 			&models.FileNode{},
 			&models.BackupSession{},
 			&models.BackupSnapshot{},
+			&models.RestoreSession{},
 		)
 
 		// Seed Admin
@@ -101,6 +102,7 @@ func main() {
 	histRepo := repositories.NewFileHistoryRepository(global.DB)
 	nodeRepo := repositories.NewFileNodeRepository(global.DB)
 	backupRepo := repositories.NewBackupRepository(global.DB)
+	restoreRepo := repositories.NewRestoreRepository(global.DB)
 
 	// 2. Services
 	// CommandSvc depends on CommandRepo
@@ -122,10 +124,13 @@ func main() {
 	treeSvc := services.NewDirectoryTreeService(nodeRepo)
 
 	// BackupSvc
-	backupSvc := services.NewBackupService(backupRepo)
+	backupSvc := services.NewBackupService(backupRepo, config.AppConfig.Backup.StoragePath)
+
+	// RestoreSvc
+	restoreSvc := services.NewRestoreService(backupRepo, restoreRepo, nodeRepo)
 
 	// 3. Inject into Controllers
-	controllers.Init(fwSvc, adminSvc, logSvc, histSvc, treeSvc, backupSvc)
+	controllers.Init(fwSvc, adminSvc, logSvc, histSvc, treeSvc, backupSvc, restoreSvc)
 	controllers.SetDirectoryTreeService(treeSvc)
 	controllers.SetBackupService(backupSvc)
 
@@ -147,6 +152,14 @@ func main() {
 	server.Router[0xF3] = controllers.HandleBackupChunk
 	server.Router[0xF5] = controllers.HandleBackupFinish
 	server.Router[0xF7] = controllers.HandleBackupCancel
+	server.Router[0xF8] = controllers.HandleBackupResume
+
+	// Restore Flow
+	server.Router[0x70] = controllers.HandleAdminRestore
+	server.Router[0x73] = controllers.HandleRestoreInit
+	server.Router[0x75] = controllers.HandleRestoreChunk
+	server.Router[0x77] = controllers.HandleRestoreFinish
+	server.Router[0x79] = controllers.HandleRestoreResume
 
 	server.Init(config.AppConfig.Server.Port, config.AppConfig.Server.APIPort)
 	server.SetHandler(server.GoRequestHandler)

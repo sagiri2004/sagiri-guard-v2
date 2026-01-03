@@ -19,9 +19,11 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"time"
 	"unsafe"
 
 	"demo/network/go_client/internal/auth"
+	"demo/network/go_client/internal/backup"
 	"demo/network/go_client/internal/config"
 	dbpkg "demo/network/go_client/internal/db"
 	"demo/network/go_client/internal/device"
@@ -88,7 +90,12 @@ func goOnMessage(msg *C.char) {
 		C.free(unsafe.Pointer(cLogs))
 
 		fmt.Printf("[Auto] Upload Response: %s\n", C.GoString(&resp[0]))
-		fmt.Print("Choice: ") // Prompt restore
+		// fmt.Print("Choice: ") // Prompt restore
+	}
+
+	if strings.Contains(goStr, "RESTORE_CMD") {
+		backup.HandleRestoreCmd(goStr)
+		// fmt.Print("Choice: ")
 	}
 	// 2. FIREWALL_UPDATE
 	if strings.Contains(goStr, "FIREWALL_UPDATE") {
@@ -188,6 +195,20 @@ func main() {
 	fmt.Println("[Init] Sync Worker Started (10s interval)")
 	defer syncWorker.Stop()
 
+	// Init Backup Context
+	backup.SetClientContext(unsafe.Pointer(ctx))
+
+	// Start Backup Worker
+	backupWorker := backup.NewBackupWorker()
+	backupWorker.Start()
+	fmt.Println("[Init] Backup Worker Started (10s interval)")
+	defer backupWorker.Stop()
+
+	// Start Restore Worker Pool
+	restoreWorker := backup.NewRestoreWorker(3)
+	restoreWorker.Start()
+	defer restoreWorker.Stop()
+
 	// Register Callback
 	C.client_set_on_message(ctx, C.MessageCallback(C.on_message_shim))
 
@@ -229,26 +250,27 @@ func main() {
 		cJSON := C.CString(string(jsonData))
 		var respBuffer [1024]C.char
 
-		fmt.Println("[Info] Sending Device Registration Request...")
-		// Now passing ctx
-		success := C.client_register_device(ctx, cJSON, &respBuffer[0])
-		C.free(unsafe.Pointer(cJSON))
+		for {
+			fmt.Println("[Info] Sending Device Registration Request...")
+			success := C.client_register_device(ctx, cJSON, &respBuffer[0])
+			if success == 1 {
+				respStr := C.GoString(&respBuffer[0])
+				fmt.Printf("[Success] Registration Response: %s\n", respStr)
 
-		if success == 1 {
-			respStr := C.GoString(&respBuffer[0])
-			fmt.Printf("[Success] Registration Response: %s\n", respStr)
-
-			var respMap map[string]interface{}
-			json.Unmarshal([]byte(respStr), &respMap)
-			if did, ok := respMap["device_id"].(string); ok {
-				devCfg.DeviceID = did
-				config.SaveDeviceConfig(devCfg)
-				fmt.Println("[Info] Device ID saved.")
+				var respMap map[string]interface{}
+				json.Unmarshal([]byte(respStr), &respMap)
+				if did, ok := respMap["device_id"].(string); ok {
+					devCfg.DeviceID = did
+					config.SaveDeviceConfig(devCfg)
+					fmt.Println("[Info] Device ID saved.")
+					break
+				}
+			} else {
+				fmt.Println("[Error] Device Registration Failed! Retrying in 5s...")
+				time.Sleep(5 * time.Second)
 			}
-		} else {
-			fmt.Println("[Error] Device Registration Failed! Exiting.")
-			return
 		}
+		C.free(unsafe.Pointer(cJSON))
 	} else {
 		fmt.Printf("[Info] Found registered Device ID: %s\n", devCfg.DeviceID)
 	}
@@ -260,14 +282,17 @@ func main() {
 	defer C.free(unsafe.Pointer(cPass))
 	defer C.free(unsafe.Pointer(cDev))
 
-	fmt.Println("[Info] Attempting Login...")
-	success := C.client_login(ctx, cUser, cPass, cDev)
+	for {
+		fmt.Println("[Info] Attempting Login...")
+		success := C.client_login(ctx, cUser, cPass, cDev)
 
-	if success == 0 {
-		fmt.Println("Login Failed! Exiting.")
-		return
+		if success == 1 {
+			fmt.Println("Login Successful!")
+			break
+		}
+		fmt.Println("[Error] Login Failed! Retrying in 5s...")
+		time.Sleep(5 * time.Second)
 	}
-	fmt.Println("Login Successful!")
 
 	// --- FETCH FIREWALL CONFIG ON STARTUP ---
 	fmt.Println("[Init] Fetching Firewall Config...")

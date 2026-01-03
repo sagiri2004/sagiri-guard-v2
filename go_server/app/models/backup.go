@@ -23,6 +23,7 @@ type BackupSession struct {
 	Version        int          `json:"version"`
 	CurrentOffset  int64        `json:"current_offset"`
 	TotalSize      int64        `json:"total_size"`
+	FileHeadHash   string       `gorm:"size:64" json:"file_head_hash"` // Hash of first 64KB
 	Status         BackupStatus `gorm:"size:20" json:"status"`
 	LastUpdateTime time.Time    `json:"last_update_time"`
 	CreatedAt      time.Time    `json:"created_at"`

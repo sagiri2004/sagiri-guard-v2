@@ -12,6 +12,7 @@ typedef struct {
     char server_host[256];
     int server_port;
     int api_port;
+    char device_id[256];
 } ClientContext;
 
 // Initialize Client Context
@@ -54,11 +55,19 @@ int client_file_sync(ClientContext *ctx, char *json_payload, char *response_buff
 
 // Browse persistent directory tree on server
 int client_admin_get_file_tree(ClientContext *ctx, char *json_payload, char *response_buffer);
+int client_admin_restore(ClientContext *ctx, char *json_payload, char *response_buffer);
 
 // Backup operations
 int client_backup_init(ClientContext *ctx, char *json_payload, char *response_buffer);
 int client_backup_chunk(ClientContext *ctx, char *json_payload, char *response_buffer);
 int client_backup_finish(ClientContext *ctx, char *json_payload, char *response_buffer);
 int client_backup_cancel(ClientContext *ctx, char *json_payload, char *response_buffer);
+int client_backup_resume(ClientContext *ctx, char *json_payload, char *response_buffer);
+
+// Restore functions
+int client_restore_init(ClientContext *ctx, char *json_payload, char *response_buffer);
+int client_restore_chunk(ClientContext *ctx, char *json_payload, char *response_buffer);
+int client_restore_finish(ClientContext *ctx, char *json_payload, char *response_buffer);
+int client_restore_resume(ClientContext *ctx, char *json_payload, char *response_buffer);
 
 #endif

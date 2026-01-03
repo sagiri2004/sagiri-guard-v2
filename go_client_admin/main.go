@@ -16,6 +16,7 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"time"
 	"unsafe"
 )
 
@@ -54,14 +55,17 @@ func main() {
 	defer C.free(unsafe.Pointer(cPass))
 	defer C.free(unsafe.Pointer(cDev))
 
-	fmt.Println("[Info] Attempting Login...")
-	success := C.client_admin_login(ctx, cUser, cPass)
+	for {
+		fmt.Println("[Info] Attempting Login...")
+		success := C.client_admin_login(ctx, cUser, cPass)
 
-	if success == 0 {
-		fmt.Println("Login Failed! Exiting.")
-		return
+		if success == 1 {
+			fmt.Println("Login Successful!")
+			break
+		}
+		fmt.Println("[Error] Login Failed! Retrying in 5s...")
+		time.Sleep(5 * time.Second)
 	}
-	fmt.Println("Login Successful!")
 
 	// Connect Notification (Optional for Admin but good for state)
 	C.client_connect_notification(ctx, cDev)
@@ -73,7 +77,8 @@ func main() {
 		fmt.Println("4. View Command History")
 		fmt.Println("5. Firewall Control")
 		fmt.Println("6. Browse File Tree")
-		fmt.Println("7. Exit")
+		fmt.Println("7. Restore File")
+		fmt.Println("8. Exit")
 		fmt.Print("Choice: ")
 
 		choiceStr, _ := reader.ReadString('\n')
@@ -280,6 +285,42 @@ func main() {
 			}
 
 		case 7:
+			// Restore
+			fmt.Print("Enter Target Device ID: ")
+			target, _ := reader.ReadString('\n')
+			target = strings.TrimSpace(target)
+
+			fmt.Print("Enter File UUID: ")
+			fileUUID, _ := reader.ReadString('\n')
+			fileUUID = strings.TrimSpace(fileUUID)
+
+			fmt.Print("Enter Version (0 for latest): ")
+			vStr, _ := reader.ReadString('\n')
+			vStr = strings.TrimSpace(vStr)
+			version := 0
+			if vStr != "" {
+				fmt.Sscanf(vStr, "%d", &version)
+			}
+
+			payload := map[string]interface{}{
+				"device_id": target,
+				"file_uuid": fileUUID,
+				"version":   version,
+			}
+			jsonBytes, _ := json.Marshal(payload)
+			cPayload := C.CString(string(jsonBytes))
+
+			var buffer [1024]C.char
+			res := C.client_admin_restore(ctx, cPayload, &buffer[0])
+			C.free(unsafe.Pointer(cPayload))
+
+			if res == 1 {
+				fmt.Printf("Response: %s\n", C.GoString(&buffer[0]))
+			} else {
+				fmt.Println("Restore Trigger Failed.")
+			}
+
+		case 8:
 			return
 		}
 	}

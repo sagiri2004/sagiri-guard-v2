@@ -50,3 +50,20 @@ func (r *BackupRepository) GetSnapshots(deviceID, fileUUID string) ([]models.Bac
 		Order("version desc").Find(&snapshots).Error
 	return snapshots, err
 }
+
+func (r *BackupRepository) GetActiveSession(deviceID, fileUUID string) (*models.BackupSession, error) {
+	var session models.BackupSession
+	err := r.db.Where("device_id = ? AND file_uuid = ? AND status = ?", deviceID, fileUUID, models.BackupInProgress).
+		Order("created_at desc").First(&session).Error
+	return &session, err
+}
+
+func (r *BackupRepository) GetLatestSnapshot(deviceID, fileUUID string, snapshot *models.BackupSnapshot) error {
+	return r.db.Where("device_id = ? AND file_uuid = ?", deviceID, fileUUID).
+		Order("version desc").First(snapshot).Error
+}
+
+func (r *BackupRepository) GetSnapshotByVersion(deviceID, fileUUID string, version int, snapshot *models.BackupSnapshot) error {
+	return r.db.Where("device_id = ? AND file_uuid = ? AND version = ?", deviceID, fileUUID, version).
+		First(snapshot).Error
+}
