@@ -1,0 +1,15 @@
+server:
+  port: 8080
+  api_port: 8081
+  db_dsn: "root:root@tcp(127.0.0.1:3306)/sagiri_guard?charset=utf8mb4&parseTime=True&loc=Local"
+
+client:
+  server_host: "127.0.0.1"
+  server_port: 8080
+  api_port: 8081
+  log_dir: "./logs"
+
+admin:
+  server_host: "127.0.0.1"
+  server_port: 8080
+  api_port: 8081
